@@ -52,15 +52,18 @@ TECH_FALLBACK_PATHS = [
 NOISE_LINES = {
     "find your contact",
     "more",
+    "back to contacts globally overview",
     "connect with us",
     "external content cannot be shown without accepting cookies",
     "email us",
     "email",
+    "send email",
     "send e-mail",
 }
 
 CORPORATE_STOP_PHRASES = {
     "as a customer please find an overview of",
+    "allianz trade is the trademark used to designate a range of services provided by euler hermes",
     "products & services",
     "contact allianz life",
     "allianz worldwide",
@@ -71,11 +74,12 @@ CORPORATE_STOP_PHRASES = {
 
 COUNTRY_TOKENS = {
     "argentina", "australia", "austria", "belgium", "bermuda", "brazil", "bulgaria", "canada", "china",
-    "colombia", "croatia", "czech republic", "france", "germany", "greece", "hong kong", "hungary",
-    "india", "indonesia", "ireland", "italy", "italia", "japan", "liechtenstein", "malaysia", "mexico",
-    "netherlands", "poland", "portugal", "romania", "singapore", "slovakia", "slovenia", "south africa",
-    "south korea", "spain", "sri lanka", "switzerland", "thailand", "turkey", "ukraine", "united kingdom",
-    "united states of america", "usa", "uk",
+    "colombia", "croatia", "czech republic", "denmark", "estonia", "finland", "france", "germany", "greece",
+    "hong kong", "hungary", "india", "indonesia", "ireland", "italy", "italia", "japan", "latvia",
+    "liechtenstein", "lithuania", "luxembourg", "malaysia", "mexico", "netherlands", "norway", "poland",
+    "portugal", "romania", "saudi arabia", "senegal", "singapore", "slovakia", "slovenia", "south africa",
+    "south korea", "spain", "sri lanka", "switzerland", "thailand", "turkey", "ukraine", "united arab emirates",
+    "united kingdom", "united states of america", "usa", "uk",
 }
 
 COUNTRY_DISPLAY_NAMES = {
@@ -91,6 +95,9 @@ COUNTRY_DISPLAY_NAMES = {
     "colombia": "Colombia",
     "croatia": "Croatia",
     "czech republic": "Czech Republic",
+    "denmark": "Denmark",
+    "estonia": "Estonia",
+    "finland": "Finland",
     "france": "France",
     "germany": "Germany",
     "greece": "Greece",
@@ -102,13 +109,19 @@ COUNTRY_DISPLAY_NAMES = {
     "italy": "Italy",
     "italia": "Italy",
     "japan": "Japan",
+    "latvia": "Latvia",
     "liechtenstein": "Liechtenstein",
+    "lithuania": "Lithuania",
+    "luxembourg": "Luxembourg",
     "malaysia": "Malaysia",
     "mexico": "Mexico",
     "netherlands": "Netherlands",
+    "norway": "Norway",
     "poland": "Poland",
     "portugal": "Portugal",
     "romania": "Romania",
+    "saudi arabia": "Saudi Arabia",
+    "senegal": "Senegal",
     "singapore": "Singapore",
     "slovakia": "Slovakia",
     "slovenia": "Slovenia",
@@ -120,6 +133,7 @@ COUNTRY_DISPLAY_NAMES = {
     "thailand": "Thailand",
     "turkey": "Turkey",
     "ukraine": "Ukraine",
+    "united arab emirates": "United Arab Emirates",
     "united kingdom": "United Kingdom",
     "united states of america": "United States of America",
     "usa": "USA",
@@ -247,7 +261,7 @@ CITY_STOPWORDS = {
 
 PHONE_RE = re.compile(r"\+?[\d][\d\s()\-/]{5,}\d")
 POSTCODE_RE = re.compile(r"\b\d{4,6}\b")
-WEBSITE_RE = re.compile(r"^(?:https?://|www\.)", re.IGNORECASE)
+WEBSITE_RE = re.compile(r"^(?:https?://)?(?:www\.)?[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/[^\s]*)?$", re.IGNORECASE)
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 
 
@@ -419,6 +433,32 @@ class AllianzScraper:
                 if record.address or record.phone or record.website:
                     records.append(record)
 
+        if records:
+            return records
+
+        fallback_lines = trim_contact_intro(lines, country)
+        for block in split_into_blocks(fallback_lines):
+            office_name = block[0]
+            office_block = block[1:]
+            if looks_like_addressish_block_start(office_name):
+                office_name = page_title or country
+                office_block = block
+            if normalize_key(office_name) in COUNTRY_TOKENS | {normalize_key(country)}:
+                continue
+            if not block_has_address_content(office_block):
+                continue
+            record = build_record_from_block(
+                business_unit="Allianz Corporate",
+                country=country,
+                office_name=office_name,
+                office_type="office",
+                block=office_block,
+                source_url=url,
+                source_page=page_title or country,
+            )
+            if record.address or record.phone or record.website:
+                records.append(record)
+
         return records
 
     def parse_commercial_page(self, url: str) -> list[OfficeRecord]:
@@ -428,33 +468,47 @@ class AllianzScraper:
         h1 = clean_text(h1_tag.get_text(" ", strip=True) if isinstance(h1_tag, Tag) else "")
         country = extract_trailing_country(h1, "Allianz Commercial in") or slug_to_country(url)
 
-        office_anchor = soup.find(id="office")
-        section_root: Tag | BeautifulSoup = soup
-        if isinstance(office_anchor, Tag):
-            office_parent = office_anchor.find_parent()
-            if isinstance(office_parent, Tag):
-                next_sibling = office_parent.find_next_sibling()
-                if isinstance(next_sibling, Tag):
-                    section_root = next_sibling
-        section_lines = text_lines(section_root.get_text("\n", strip=True))
-        office_lines = slice_lines(section_lines, "Our office") or section_lines
+        body = soup.find("main") or soup.body or soup
+        section_lines = text_lines(body.get_text("\n", strip=True))
+        office_lines = extract_section_lines_by_heading(
+            body,
+            section_lines,
+            lambda title: normalize_key(title) in {"our office", "our offices"},
+        )
+        if not office_lines:
+            office_anchor = soup.find(id="office")
+            section_root: Tag | BeautifulSoup = soup
+            if isinstance(office_anchor, Tag):
+                office_parent = office_anchor.find_parent()
+                if isinstance(office_parent, Tag):
+                    next_sibling = office_parent.find_next_sibling()
+                    if isinstance(next_sibling, Tag):
+                        section_root = next_sibling
+            section_lines = text_lines(section_root.get_text("\n", strip=True))
+            office_lines = slice_lines(section_lines, "Our office") or slice_lines(section_lines, "Our offices") or section_lines
 
         contact_email = first_email_from_links(soup.select("a[href]"))
         records: list[OfficeRecord] = []
-        for block in split_into_blocks(office_lines[1:] if office_lines[:1] == ["Our office"] else office_lines):
-            office_name = block[0]
+        office_payload = office_lines
+        if office_lines and normalize_key(office_lines[0]) in {"our office", "our offices"}:
+            office_payload = office_lines[1:]
+        for office_name, office_block in split_commercial_office_blocks(office_payload):
+            if not office_name or looks_like_addressish_block_start(office_name):
+                office_name = h1 or f"Allianz Commercial {country}"
+            if not block_has_address_content(office_block):
+                continue
             record = build_record_from_block(
                 business_unit="Allianz Commercial",
                 country=country,
                 office_name=office_name,
                 office_type="office",
-                block=block[1:],
+                block=office_block,
                 source_url=url,
                 source_page=page_title or h1 or country,
             )
             if contact_email and not record.email:
                 record.email = contact_email
-            if record.address:
+            if record.address or record.phone or record.website:
                 records.append(record)
 
         return records
@@ -560,8 +614,8 @@ def slice_lines(lines: list[str], start: str, end: str | None = None) -> list[st
 def looks_like_contact_line(line: str) -> bool:
     lower = line.lower()
     return bool(
-        PHONE_RE.search(line)
-        or WEBSITE_RE.search(line)
+        looks_like_phone_line(line)
+        or looks_like_website_line(line)
         or EMAIL_RE.search(line)
         or lower in {"send e-mail", "email us", "email"}
     )
@@ -572,7 +626,32 @@ def looks_like_address_line(line: str) -> bool:
 
 
 def looks_like_country_line(line: str) -> bool:
-    return normalize_key(line) in COUNTRY_TOKENS
+    normalized = normalize_key(line)
+    if normalized.startswith("the "):
+        normalized = normalized[4:]
+    return normalized in COUNTRY_TOKENS
+
+
+def extract_phone_numbers(text: str) -> list[str]:
+    phones: list[str] = []
+    for match in PHONE_RE.finditer(text):
+        phone = clean_text(match.group(0).rstrip(".,;:)"))
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) < 7:
+            continue
+        if re.search(r"[A-Za-zÀ-ÿ]", phone):
+            continue
+        phones.append(phone)
+    return unique(phones)
+
+
+def looks_like_phone_line(line: str) -> bool:
+    if not extract_phone_numbers(line):
+        return False
+    if re.search(r"[A-Za-zÀ-ÿ]", line):
+        normalized = normalize_key(line)
+        return any(token in normalized.split() for token in {"call", "fax", "mobile", "phone", "tel", "telephone"})
+    return True
 
 
 def is_corporate_stop_line(line: str) -> bool:
@@ -581,11 +660,20 @@ def is_corporate_stop_line(line: str) -> bool:
 
 
 def looks_like_block_start(line: str) -> bool:
-    if looks_like_contact_line(line) or looks_like_address_line(line):
+    if looks_like_contact_line(line) or looks_like_address_line(line) or looks_like_country_line(line):
         return False
     if len(line) > 90:
         return False
     return bool(re.search(r"[A-Za-z]", line))
+
+
+def looks_like_website_line(line: str) -> bool:
+    candidate = clean_text(line).rstrip(".,;)")
+    return bool(candidate and " " not in candidate and "@" not in candidate and WEBSITE_RE.fullmatch(candidate))
+
+
+def looks_like_addressish_block_start(line: str) -> bool:
+    return looks_like_address_line(line) or looks_like_country_line(line) or looks_like_website_line(line)
 
 
 def split_into_blocks(lines: Iterable[str]) -> list[list[str]]:
@@ -602,6 +690,77 @@ def split_into_blocks(lines: Iterable[str]) -> list[list[str]]:
     if current:
         blocks.append(current)
     return blocks
+
+
+def block_has_address_content(lines: Iterable[str]) -> bool:
+    return any(looks_like_address_line(line) or looks_like_country_line(line) for line in lines)
+
+
+def looks_like_commercial_office_heading(line: str) -> bool:
+    normalized = normalize_key(line)
+    return bool(normalized.endswith(" office") and not looks_like_addressish_block_start(line))
+
+
+def looks_like_region_code(line: str) -> bool:
+    cleaned = clean_text(line)
+    return bool(re.fullmatch(r"[A-Z]{2,3}", cleaned)) and not looks_like_country_line(cleaned)
+
+
+def split_commercial_office_blocks(lines: list[str]) -> list[tuple[str, list[str]]]:
+    blocks: list[tuple[str, list[str]]] = []
+    office_name = ""
+    current: list[str] = []
+
+    def flush() -> None:
+        nonlocal office_name, current
+        if office_name or current:
+            blocks.append((office_name, current[:]))
+        office_name = ""
+        current = []
+
+    for line in lines:
+        if line.lower() in NOISE_LINES:
+            continue
+        if looks_like_region_code(line):
+            continue
+        if looks_like_commercial_office_heading(line):
+            flush()
+            office_name = line
+            continue
+        current.append(line)
+
+    flush()
+    return [(name, block) for name, block in blocks if name or block]
+
+
+def trim_contact_intro(lines: list[str], country: str) -> list[str]:
+    for index, line in enumerate(lines):
+        if "here you will find the contact details" in normalize_key(line):
+            return lines[index + 1 :]
+    country_key = normalize_key(country)
+    last_country_index = -1
+    for index, line in enumerate(lines[:20]):
+        if normalize_key(line) == country_key:
+            last_country_index = index
+    if last_country_index >= 0:
+        return lines[last_country_index + 1 :]
+    return lines
+
+
+def extract_section_lines_by_heading(
+    root: Tag | BeautifulSoup,
+    lines: list[str],
+    predicate,
+    heading_names: tuple[str, ...] = ("h2",),
+) -> list[str]:
+    titles = [clean_text(tag.get_text(" ", strip=True)) for tag in root.find_all(list(heading_names))]
+    titles = [title for title in titles if title]
+    for index, title in enumerate(titles):
+        if not predicate(title):
+            continue
+        next_title = titles[index + 1] if index + 1 < len(titles) else None
+        return slice_lines(lines, title, next_title) or slice_lines(lines, title)
+    return []
 
 
 def parse_labeled_corporate_entries(lines: list[str]) -> list[tuple[str, str]]:
@@ -629,7 +788,7 @@ def parse_labeled_corporate_entries(lines: list[str]) -> list[tuple[str, str]]:
         groups: list[list[str]] = []
         current_group: list[str] = []
         for item in address_lines:
-            if re.search(r"\d", item) and current_group and any(re.search(r"\d", part) for part in current_group):
+            if current_group and looks_like_block_start(item) and any(looks_like_address_line(part) for part in current_group):
                 groups.append(current_group)
                 current_group = [item]
             else:
@@ -727,8 +886,8 @@ def build_record_from_block(
     source_page: str,
     city_hint: str = "",
 ) -> OfficeRecord:
-    phones = [line for line in block if PHONE_RE.search(line)]
-    websites = [line for line in block if WEBSITE_RE.search(line)]
+    phones = [phone for line in block if looks_like_phone_line(line) for phone in extract_phone_numbers(line)]
+    websites = [line for line in block if looks_like_website_line(line)]
     emails = [line for line in block if EMAIL_RE.search(line)]
     address_lines = [line for line in block if not looks_like_contact_line(line)]
     address_lines = [line for line in address_lines if not is_corporate_stop_line(line)]
@@ -880,16 +1039,7 @@ def looks_like_address_for_report(address: str) -> bool:
 
 
 def extract_phone_numbers_for_report(text: str) -> list[str]:
-    phones: list[str] = []
-    for match in PHONE_RE.finditer(text):
-        phone = clean_text(match.group(0).rstrip(".,;:)"))
-        digits = re.sub(r"\D", "", phone)
-        if len(digits) < 7:
-            continue
-        if re.search(r"[A-Za-zÀ-ÿ]", phone):
-            continue
-        phones.append(phone)
-    return unique_clean(phones)
+    return unique_clean(extract_phone_numbers(text))
 
 
 def clean_phone_for_report(phone: str) -> str:
