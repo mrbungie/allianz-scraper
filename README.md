@@ -39,6 +39,12 @@ Write both the full report and the city-level report to custom paths:
 uv run python scripts/allianz_scraper.py --output data/allianz_offices.csv --city-output data/allianz_city_offices.csv
 ```
 
+If you already have `data/allianz_offices.csv` and only want to rebuild the processed city-level file:
+
+```bash
+uv run python scripts/allianz_city_report.py --input data/allianz_offices.csv --output data/allianz_city_offices.csv
+```
+
 ## Output
 
 The scraper writes a CSV with these columns:
@@ -86,6 +92,7 @@ The script aggregates data from:
 │   ├── allianz_city_offices.csv
 │   └── allianz_offices.csv
 ├── scripts/
+│   ├── allianz_city_report.py
 │   └── allianz_scraper.py
 ├── pyproject.toml
 └── uv.lock

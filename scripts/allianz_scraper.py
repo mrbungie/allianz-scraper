@@ -127,6 +127,15 @@ COUNTRY_DISPLAY_NAMES = {
 }
 
 CITY_BLACKLIST = {
+    "our",
+    "our office",
+    "our offices",
+    "offices",
+    "read more",
+    "commercial insights",
+    "do you need further information",
+    "motor trade",
+    "traded via our specialist regional hubs",
     "back to contacts globally overview",
     "for enquiries",
     "products services",
@@ -151,6 +160,89 @@ CITY_BLACKLIST = {
     "offered by allianz insurance plc",
     "the data center construction boom",
     "top 3 business risks in 2026",
+}
+
+ADDRESS_SEGMENT_BLACKLIST = {
+    "back to contacts globally overview",
+    "contact us",
+    "email us",
+    "find us",
+    "for enquiries",
+    "get directions",
+    "health team helpline",
+    "our brand name",
+    "postal address",
+    "products and services",
+    "products services",
+    "send email",
+    "send e mail",
+    "send e-mail",
+    "visitor address",
+}
+
+ADDRESS_SEGMENT_NOISE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"allianz trade is the trademark used to designate",
+        r"all office locations",
+        r"all reports",
+        r"as a customer please find an overview",
+        r"back to contacts",
+        r"commercial insights",
+        r"do you need further information",
+        r"emerging risk trend talk",
+        r"find out more",
+        r"for queries related to",
+        r"if you have any question",
+        r"if you have any doubt",
+        r"please visit",
+        r"privacy",
+        r"products and services to suit",
+        r"portability of your data",
+        r"read more",
+        r"through\s+we offer",
+        r"website domain names and email addresses changed",
+        r"whistleblowing",
+        r"your information will be treated confidentially",
+        r"\b\d+\s*(?:kb|mb)\b",
+        r"\[email protected\]",
+        r"@",
+        r"www\.",
+    )
+]
+
+CITY_STOPWORDS = {
+    "area",
+    "avenue",
+    "block",
+    "boulevard",
+    "branch",
+    "building",
+    "campus",
+    "cedex",
+    "center",
+    "centre",
+    "cours",
+    "district",
+    "drive",
+    "floor",
+    "governorate",
+    "house",
+    "office",
+    "park",
+    "phase",
+    "plaza",
+    "province",
+    "region",
+    "road",
+    "rue",
+    "square",
+    "strasse",
+    "straße",
+    "street",
+    "suite",
+    "tower",
+    "towers",
 }
 
 PHONE_RE = re.compile(r"\+?[\d][\d\s()\-/]{5,}\d")
@@ -674,6 +766,18 @@ def normalize_city_key(city: str) -> str:
     return normalize_key(city)
 
 
+def unique_clean(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = clean_text(value)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
 def canonical_country_from_text(text: str) -> str:
     normalized = f" {normalize_key(text)} "
     for token, country_name in sorted(COUNTRY_DISPLAY_NAMES.items(), key=lambda item: len(item[0]), reverse=True):
@@ -696,9 +800,11 @@ def cleanup_city_candidate(value: str, country: str = "") -> str:
         return ""
     if country:
         candidate = re.sub(rf",?\s*{re.escape(country)}$", "", candidate, flags=re.IGNORECASE).strip(" ,-–")
+    candidate = candidate.split("|")[-1].strip()
     candidate = re.sub(r"^\d{4,6}(?:-\d{2,4})?\s+", "", candidate)
     candidate = re.sub(r",?\s*[A-Z]{1,3}\s+\d{4,6}(?:-\d{4})?$", "", candidate)
     candidate = re.sub(r"\b\d{4,6}(?:-\d{4})?\b", "", candidate)
+    candidate = re.sub(r"^[^A-Za-zÀ-ÿ]+", "", candidate)
     candidate = re.sub(r"\s+", " ", candidate).strip(" ,-–")
     return candidate
 
@@ -706,11 +812,14 @@ def cleanup_city_candidate(value: str, country: str = "") -> str:
 def looks_like_city_candidate(value: str, country: str = "") -> bool:
     candidate = cleanup_city_candidate(value, country)
     normalized = normalize_key(candidate)
+    country_normalized = normalize_key(country)
     if not candidate or not normalized:
         return False
     if normalized in CITY_BLACKLIST or normalized in COUNTRY_TOKENS:
         return False
-    if country and normalized == normalize_key(country):
+    if country and normalized == country_normalized:
+        return False
+    if country_normalized and (normalized.startswith(country_normalized) or country_normalized.startswith(normalized)):
         return False
     if len(candidate) > 40 or len(candidate) < 3:
         return False
@@ -720,38 +829,125 @@ def looks_like_city_candidate(value: str, country: str = "") -> bool:
         return False
     if not re.search(r"[A-Za-zÀ-ÿ]", candidate):
         return False
-    if re.search(r"\b(?:office|contact|building|floor|tower|towers|road|street|drive|avenue|box|branch|laan|str|krt|gurtel|gürtel|district|suite|square|center|centre|plaza|park|house|cedex|block|phase|officer)\b", normalized):
+    if all(len(token) <= 1 for token in normalized.split()):
+        return False
+    if any(stopword in normalized.split() for stopword in CITY_STOPWORDS):
         return False
     if re.search(r"\b(?:risk|insurance|reinsurance|solutions|solution|infrastructure|registration|registered|limited|ltd|plc|llc|inc|company|benefits|holding|services|enquiries|compliance|global|local)\b", normalized):
+        return False
+    if re.search(r"\b(?:ag|sa|se|sas|sro|gmbh|kg|bv|nv|spa|srl|sarl|llp)\b", normalized):
         return False
     if "allianz" in normalized:
         return False
     return True
 
 
-def extract_city_from_address_for_report(address: str, country: str) -> str:
-    parts = [clean_text(part) for part in address.split(",") if clean_text(part)]
+def split_address_segments(address: str) -> list[str]:
+    return [clean_text(part) for part in re.split(r"[,|]", address) if clean_text(part)]
+
+
+def is_noise_address_segment(segment: str) -> bool:
+    normalized = normalize_key(segment)
+    if not normalized:
+        return True
+    if normalized in ADDRESS_SEGMENT_BLACKLIST:
+        return True
+    if any(pattern.search(segment) for pattern in ADDRESS_SEGMENT_NOISE_PATTERNS):
+        return True
+    return False
+
+
+def clean_address_for_report(address: str) -> str:
+    kept: list[str] = []
+    for segment in split_address_segments(address):
+        if is_noise_address_segment(segment):
+            continue
+        segment = clean_text(segment)
+        if segment:
+            kept.append(segment)
+    return ", ".join(unique_clean(kept))
+
+
+def looks_like_address_for_report(address: str) -> bool:
+    if not address:
+        return False
+    parts = split_address_segments(address)
+    if len(parts) < 2 or len(parts) > 12:
+        return False
+    if any(pattern.search(address) for pattern in ADDRESS_SEGMENT_NOISE_PATTERNS):
+        return False
+    return any(re.search(r"\d", part) for part in parts)
+
+
+def extract_phone_numbers_for_report(text: str) -> list[str]:
+    phones: list[str] = []
+    for match in PHONE_RE.finditer(text):
+        phone = clean_text(match.group(0).rstrip(".,;:)"))
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) < 7:
+            continue
+        if re.search(r"[A-Za-zÀ-ÿ]", phone):
+            continue
+        phones.append(phone)
+    return unique_clean(phones)
+
+
+def clean_phone_for_report(phone: str) -> str:
+    return " | ".join(extract_phone_numbers_for_report(phone))
+
+
+def extract_city_candidates_from_address(address: str, country: str) -> list[str]:
+    parts = split_address_segments(address)
+    candidates: list[str] = []
     for part in reversed(parts):
         candidate = cleanup_city_candidate(part, country)
         if looks_like_city_candidate(candidate, country):
-            return candidate
+            candidates.append(candidate)
     postcode_match = re.search(r"\b\d{4,6}\s+([A-Za-zÀ-ÿ'\- ]+)\b", address)
     if postcode_match:
         candidate = cleanup_city_candidate(postcode_match.group(1), country)
         if looks_like_city_candidate(candidate, country):
-            return candidate
-    return ""
+            candidates.append(candidate)
+    return unique_clean(candidates)
+
+
+def city_candidate_score(candidate: str, source: str, cleaned_address: str, record: OfficeRecord, country: str) -> int:
+    score = 0
+    normalized_candidate = normalize_key(candidate)
+    normalized_address = normalize_key(cleaned_address)
+    if source == "address":
+        score += 4
+    elif source == "record_city":
+        score += 2
+    else:
+        score += 3
+    if normalized_candidate and normalized_candidate in normalized_address:
+        score += 2
+    if candidate == record.office_name:
+        score += 1
+    if candidate == record.city:
+        score += 1
+    if re.search(r"[()\-]", candidate):
+        score -= 1
+    if country and normalize_key(candidate) == normalize_key(country):
+        score -= 10
+    return score
 
 
 def resolve_city_for_report(record: OfficeRecord, country: str) -> str:
-    for candidate in (
-        extract_city_from_address_for_report(record.address, country),
-        record.city,
-    ):
-        cleaned = cleanup_city_candidate(candidate, country)
+    cleaned_address = clean_address_for_report(record.address)
+    candidates: list[tuple[int, str]] = []
+    for source, raw_candidate in (("office_name", record.office_name), ("record_city", record.city)):
+        cleaned = cleanup_city_candidate(raw_candidate, country)
         if looks_like_city_candidate(cleaned, country):
-            return cleaned
-    return ""
+            candidates.append((city_candidate_score(cleaned, source, cleaned_address, record, country), cleaned))
+    for raw_candidate in extract_city_candidates_from_address(cleaned_address, country):
+        cleaned = cleanup_city_candidate(raw_candidate, country)
+        if looks_like_city_candidate(cleaned, country):
+            candidates.append((city_candidate_score(cleaned, "address", cleaned_address, record, country), cleaned))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda item: (item[0], -len(item[1]), item[1]))[1]
 
 
 def office_type_priority(office_type: str) -> int:
@@ -788,17 +984,21 @@ def office_name_priority(record: OfficeRecord) -> int:
         score += 3
     if "allianz" in label:
         score += 1
+    if looks_like_city_candidate(record.office_name, record.country):
+        score += 2
     return score
 
 
 def city_report_sort_key(record: OfficeRecord) -> tuple[int, int, int, int, int, int]:
+    cleaned_phone = clean_phone_for_report(record.phone)
+    cleaned_address = clean_address_for_report(record.address)
     return (
         office_type_priority(record.office_type),
         office_name_priority(record),
         business_unit_priority(record.business_unit),
-        int(bool(record.phone)),
-        int(bool(record.address)),
-        len(record.address),
+        int(bool(cleaned_phone)),
+        int(looks_like_address_for_report(cleaned_address)),
+        len(cleaned_address),
     )
 
 
@@ -806,6 +1006,9 @@ def build_city_report(records: Iterable[OfficeRecord]) -> list[CityReportRecord]
     selected: dict[tuple[str, str], OfficeRecord] = {}
     for record in records:
         country = resolve_country_for_report(record)
+        cleaned_address = clean_address_for_report(record.address)
+        if not looks_like_address_for_report(cleaned_address):
+            continue
         city = resolve_city_for_report(record, country)
         if not city:
             continue
@@ -817,13 +1020,14 @@ def build_city_report(records: Iterable[OfficeRecord]) -> list[CityReportRecord]
     report: list[CityReportRecord] = []
     for (country, _), record in sorted(selected.items(), key=lambda item: (item[0][0], resolve_city_for_report(item[1], item[0][0]).lower(), item[1].business_unit.lower())):
         city = resolve_city_for_report(record, country)
+        cleaned_address = clean_address_for_report(record.address)
         report.append(
             CityReportRecord(
                 country=country,
                 city=city,
                 company_type=f"{record.business_unit} {city}",
-                address=record.address,
-                phone=record.phone,
+                address=cleaned_address,
+                phone=clean_phone_for_report(record.phone),
             )
         )
     return report
