@@ -18,6 +18,7 @@ from bs4.element import Tag
 USER_AGENT = "Mozilla/5.0 (compatible; AllianzOfficeScraper/0.1; +https://example.com/bot)"
 TIMEOUT = 30
 DELAY_SECONDS = 0.25
+MAX_FETCH_ATTEMPTS = 3
 
 CORPORATE_INDEX = "https://www.allianz.com/en/about-us/company/contact.html"
 COMMERCIAL_INDEX = "https://commercial.allianz.com/global-offices.html"
@@ -77,6 +78,81 @@ COUNTRY_TOKENS = {
     "united states of america", "usa", "uk",
 }
 
+COUNTRY_DISPLAY_NAMES = {
+    "argentina": "Argentina",
+    "australia": "Australia",
+    "austria": "Austria",
+    "belgium": "Belgium",
+    "bermuda": "Bermuda",
+    "brazil": "Brazil",
+    "bulgaria": "Bulgaria",
+    "canada": "Canada",
+    "china": "China",
+    "colombia": "Colombia",
+    "croatia": "Croatia",
+    "czech republic": "Czech Republic",
+    "france": "France",
+    "germany": "Germany",
+    "greece": "Greece",
+    "hong kong": "Hong Kong",
+    "hungary": "Hungary",
+    "india": "India",
+    "indonesia": "Indonesia",
+    "ireland": "Ireland",
+    "italy": "Italy",
+    "italia": "Italy",
+    "japan": "Japan",
+    "liechtenstein": "Liechtenstein",
+    "malaysia": "Malaysia",
+    "mexico": "Mexico",
+    "netherlands": "Netherlands",
+    "poland": "Poland",
+    "portugal": "Portugal",
+    "romania": "Romania",
+    "singapore": "Singapore",
+    "slovakia": "Slovakia",
+    "slovenia": "Slovenia",
+    "south africa": "South Africa",
+    "south korea": "South Korea",
+    "spain": "Spain",
+    "sri lanka": "Sri Lanka",
+    "switzerland": "Switzerland",
+    "thailand": "Thailand",
+    "turkey": "Turkey",
+    "ukraine": "Ukraine",
+    "united kingdom": "United Kingdom",
+    "united states of america": "United States of America",
+    "usa": "USA",
+    "uk": "UK",
+}
+
+CITY_BLACKLIST = {
+    "back to contacts globally overview",
+    "for enquiries",
+    "products services",
+    "products and services",
+    "send email",
+    "send e mail",
+    "send e-mail",
+    "email us",
+    "get directions",
+    "contact us",
+    "local compliance officer",
+    "nextcare holding wll",
+    "ou uma carta de proprio punho para",
+    "ou uma carta de próprio punho para",
+    "pimco",
+    "solunion",
+    "colserauto",
+    "block a",
+    "cityplaza phase four",
+    "lg twin towers",
+    "technopark trivandrum kerala",
+    "offered by allianz insurance plc",
+    "the data center construction boom",
+    "top 3 business risks in 2026",
+}
+
 PHONE_RE = re.compile(r"\+?[\d][\d\s()\-/]{5,}\d")
 POSTCODE_RE = re.compile(r"\b\d{4,6}\b")
 WEBSITE_RE = re.compile(r"^(?:https?://|www\.)", re.IGNORECASE)
@@ -100,6 +176,15 @@ class OfficeRecord:
     notes: str
 
 
+@dataclass
+class CityReportRecord:
+    country: str
+    city: str
+    company_type: str
+    address: str
+    phone: str
+
+
 class AllianzScraper:
     def __init__(self) -> None:
         cloudscraper = importlib.import_module("cloudscraper")
@@ -107,10 +192,21 @@ class AllianzScraper:
         self.session.headers.update({"User-Agent": USER_AGENT})
 
     def fetch(self, url: str) -> BeautifulSoup:
-        response = self.session.get(url, timeout=TIMEOUT)
-        response.raise_for_status()
-        time.sleep(DELAY_SECONDS)
-        return BeautifulSoup(response.text, "html.parser")
+        last_error: requests.RequestException | None = None
+        for attempt in range(1, MAX_FETCH_ATTEMPTS + 1):
+            try:
+                response = self.session.get(url, timeout=TIMEOUT)
+                response.raise_for_status()
+                time.sleep(DELAY_SECONDS)
+                return BeautifulSoup(response.text, "html.parser")
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt == MAX_FETCH_ATTEMPTS:
+                    raise
+                time.sleep(DELAY_SECONDS * attempt)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Failed to fetch {url}")
 
     def extract_links(self, index_url: str, predicate) -> list[str]:
         soup = self.fetch(index_url)
@@ -574,19 +670,198 @@ def write_csv(records: list[OfficeRecord], output_path: Path) -> None:
             writer.writerow(asdict(record))
 
 
+def normalize_city_key(city: str) -> str:
+    return normalize_key(city)
+
+
+def canonical_country_from_text(text: str) -> str:
+    normalized = f" {normalize_key(text)} "
+    for token, country_name in sorted(COUNTRY_DISPLAY_NAMES.items(), key=lambda item: len(item[0]), reverse=True):
+        if f" {token} " in normalized:
+            return country_name
+    return ""
+
+
+def resolve_country_for_report(record: OfficeRecord) -> str:
+    for candidate in (record.country, record.office_name, record.source_page, record.address, slug_to_country(record.source_url)):
+        country = canonical_country_from_text(candidate)
+        if country:
+            return country
+    return clean_text(record.country)
+
+
+def cleanup_city_candidate(value: str, country: str = "") -> str:
+    candidate = clean_text(value)
+    if not candidate:
+        return ""
+    if country:
+        candidate = re.sub(rf",?\s*{re.escape(country)}$", "", candidate, flags=re.IGNORECASE).strip(" ,-–")
+    candidate = re.sub(r"^\d{4,6}(?:-\d{2,4})?\s+", "", candidate)
+    candidate = re.sub(r",?\s*[A-Z]{1,3}\s+\d{4,6}(?:-\d{4})?$", "", candidate)
+    candidate = re.sub(r"\b\d{4,6}(?:-\d{4})?\b", "", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip(" ,-–")
+    return candidate
+
+
+def looks_like_city_candidate(value: str, country: str = "") -> bool:
+    candidate = cleanup_city_candidate(value, country)
+    normalized = normalize_key(candidate)
+    if not candidate or not normalized:
+        return False
+    if normalized in CITY_BLACKLIST or normalized in COUNTRY_TOKENS:
+        return False
+    if country and normalized == normalize_key(country):
+        return False
+    if len(candidate) > 40 or len(candidate) < 3:
+        return False
+    if re.search(r"\d", candidate):
+        return False
+    if re.search(r"[,/:;&]", candidate):
+        return False
+    if not re.search(r"[A-Za-zÀ-ÿ]", candidate):
+        return False
+    if re.search(r"\b(?:office|contact|building|floor|tower|towers|road|street|drive|avenue|box|branch|laan|str|krt|gurtel|gürtel|district|suite|square|center|centre|plaza|park|house|cedex|block|phase|officer)\b", normalized):
+        return False
+    if re.search(r"\b(?:risk|insurance|reinsurance|solutions|solution|infrastructure|registration|registered|limited|ltd|plc|llc|inc|company|benefits|holding|services|enquiries|compliance|global|local)\b", normalized):
+        return False
+    if "allianz" in normalized:
+        return False
+    return True
+
+
+def extract_city_from_address_for_report(address: str, country: str) -> str:
+    parts = [clean_text(part) for part in address.split(",") if clean_text(part)]
+    for part in reversed(parts):
+        candidate = cleanup_city_candidate(part, country)
+        if looks_like_city_candidate(candidate, country):
+            return candidate
+    postcode_match = re.search(r"\b\d{4,6}\s+([A-Za-zÀ-ÿ'\- ]+)\b", address)
+    if postcode_match:
+        candidate = cleanup_city_candidate(postcode_match.group(1), country)
+        if looks_like_city_candidate(candidate, country):
+            return candidate
+    return ""
+
+
+def resolve_city_for_report(record: OfficeRecord, country: str) -> str:
+    for candidate in (
+        extract_city_from_address_for_report(record.address, country),
+        record.city,
+    ):
+        cleaned = cleanup_city_candidate(candidate, country)
+        if looks_like_city_candidate(cleaned, country):
+            return cleaned
+    return ""
+
+
+def office_type_priority(office_type: str) -> int:
+    priorities = {
+        "general_management_and_offices": 7,
+        "legal_head_office": 6,
+        "head_office": 5,
+        "registered_office": 4,
+        "operational_offices": 3,
+        "operational_office": 3,
+        "office": 2,
+        "contact": 1,
+    }
+    return priorities.get(office_type, 0)
+
+
+def business_unit_priority(business_unit: str) -> int:
+    priorities = {
+        "Allianz Corporate": 3,
+        "Allianz Commercial": 2,
+        "Allianz Technology": 1,
+    }
+    return priorities.get(business_unit, 0)
+
+
+def office_name_priority(record: OfficeRecord) -> int:
+    label = normalize_key(f"{record.office_name} {record.office_type}")
+    score = 0
+    if "head office" in label:
+        score += 4
+    if "registered office" in label:
+        score += 3
+    if "general management" in label:
+        score += 3
+    if "allianz" in label:
+        score += 1
+    return score
+
+
+def city_report_sort_key(record: OfficeRecord) -> tuple[int, int, int, int, int, int]:
+    return (
+        office_type_priority(record.office_type),
+        office_name_priority(record),
+        business_unit_priority(record.business_unit),
+        int(bool(record.phone)),
+        int(bool(record.address)),
+        len(record.address),
+    )
+
+
+def build_city_report(records: Iterable[OfficeRecord]) -> list[CityReportRecord]:
+    selected: dict[tuple[str, str], OfficeRecord] = {}
+    for record in records:
+        country = resolve_country_for_report(record)
+        city = resolve_city_for_report(record, country)
+        if not city:
+            continue
+        key = (country, normalize_city_key(city))
+        current = selected.get(key)
+        if current is None or city_report_sort_key(record) > city_report_sort_key(current):
+            selected[key] = record
+
+    report: list[CityReportRecord] = []
+    for (country, _), record in sorted(selected.items(), key=lambda item: (item[0][0], resolve_city_for_report(item[1], item[0][0]).lower(), item[1].business_unit.lower())):
+        city = resolve_city_for_report(record, country)
+        report.append(
+            CityReportRecord(
+                country=country,
+                city=city,
+                company_type=f"{record.business_unit} {city}",
+                address=record.address,
+                phone=record.phone,
+            )
+        )
+    return report
+
+
+def write_city_report(records: list[CityReportRecord], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(asdict(records[0]).keys()))
+        writer.writeheader()
+        for record in records:
+            writer.writerow(asdict(record))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scrape Allianz office data into CSV")
     parser.add_argument("--output", default="data/allianz_offices.csv", help="Output CSV path")
+    parser.add_argument(
+        "--city-output",
+        default="data/allianz_city_offices.csv",
+        help="Output CSV path for one office per city",
+    )
     args = parser.parse_args()
 
     scraper = AllianzScraper()
     records = scraper.scrape()
     if not records:
         raise SystemExit("No records scraped")
+    city_records = build_city_report(records)
+    if not city_records:
+        raise SystemExit("No city report rows produced")
 
     output_path = Path(args.output)
     write_csv(records, output_path)
+    city_output_path = Path(args.city_output)
+    write_city_report(city_records, city_output_path)
     print(f"wrote {len(records)} rows to {output_path}")
+    print(f"wrote {len(city_records)} rows to {city_output_path}")
     print(f"business units: {', '.join(sorted({record.business_unit for record in records}))}")
 
 

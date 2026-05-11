@@ -33,6 +33,12 @@ Write to a custom CSV path:
 uv run python scripts/allianz_scraper.py --output data/allianz_offices.csv
 ```
 
+Write both the full report and the city-level report to custom paths:
+
+```bash
+uv run python scripts/allianz_scraper.py --output data/allianz_offices.csv --city-output data/allianz_city_offices.csv
+```
+
 ## Output
 
 The scraper writes a CSV with these columns:
@@ -51,9 +57,18 @@ The scraper writes a CSV with these columns:
 - `source_page`
 - `notes`
 
+It also writes a second city-level CSV with one selected record per country/city and these columns:
+
+- `country`
+- `city`
+- `company_type`
+- `address`
+- `phone`
+
 Default output file:
 
 - `data/allianz_offices.csv`
+- `data/allianz_city_offices.csv`
 
 ## Sources
 
@@ -68,6 +83,7 @@ The script aggregates data from:
 ```text
 .
 ├── data/
+│   ├── allianz_city_offices.csv
 │   └── allianz_offices.csv
 ├── scripts/
 │   └── allianz_scraper.py
@@ -79,4 +95,5 @@ The script aggregates data from:
 
 - Uses `cloudscraper` to improve reliability against anti-bot protections.
 - De-duplicates records by business unit, country, office name, and address.
+- The city-level report keeps one best-fit record per country/city, preferring head-office style entries over generic contacts.
 - The checked-in CSV is a generated dataset sample/output.
