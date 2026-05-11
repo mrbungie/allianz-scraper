@@ -1,6 +1,6 @@
 # allianz-scraper
 
-Python scraper that collects Allianz office/contact data from Allianz corporate, commercial, and technology pages and exports it to CSV.
+Python scraper for Allianz corporate contact country pages that exports both raw office rows and a city-level CSV.
 
 ## Requirements
 
@@ -21,33 +21,24 @@ pip install beautifulsoup4 cloudscraper requests
 
 ## Usage
 
-Write to the default output path:
+Scrape all corporate country pages linked from the Allianz contact index:
 
 ```bash
-uv run python scripts/allianz_scraper.py
+uv run python scripts/allianz_corporate_index_scraper.py --index-url "https://www.allianz.com/en/about-us/company/contact.html"
 ```
 
-Write to a custom CSV path:
+Write to custom output paths:
 
 ```bash
-uv run python scripts/allianz_scraper.py --output data/allianz_offices.csv
-```
-
-Write both the full report and the city-level report to custom paths:
-
-```bash
-uv run python scripts/allianz_scraper.py --output data/allianz_offices.csv --city-output data/allianz_city_offices.csv
-```
-
-If you already have `data/allianz_offices.csv` and only want to rebuild the processed city-level file:
-
-```bash
-uv run python scripts/allianz_city_report.py --input data/allianz_offices.csv --output data/allianz_city_offices.csv
+uv run python scripts/allianz_corporate_index_scraper.py \
+  --index-url "https://www.allianz.com/en/about-us/company/contact.html" \
+  --output data/allianz_contact_index_all.csv \
+  --city-output data/allianz_contact_index_city.csv
 ```
 
 ## Output
 
-The scraper writes a CSV with these columns:
+The raw scraper writes a CSV with these columns:
 
 - `business_unit`
 - `country`
@@ -71,29 +62,26 @@ It also writes a second city-level CSV with one selected record per country/city
 - `address`
 - `phone`
 
-Default output file:
+Default output files:
 
-- `data/allianz_offices.csv`
-- `data/allianz_city_offices.csv`
+- `data/allianz_contact_index_all.csv`
+- `data/allianz_contact_index_city.csv`
 
-## Sources
+## Source
 
-The script aggregates data from:
+The scraper starts from the Allianz corporate contact index and follows the linked country pages:
 
-- Allianz corporate contact pages
-- Allianz Commercial global office pages
-- Allianz Technology contact pages
+- `https://www.allianz.com/en/about-us/company/contact.html`
 
 ## Project structure
 
 ```text
 .
 ├── data/
-│   ├── allianz_city_offices.csv
-│   └── allianz_offices.csv
+│   ├── allianz_contact_index_all.csv
+│   └── allianz_contact_index_city.csv
 ├── scripts/
-│   ├── allianz_city_report.py
-│   └── allianz_scraper.py
+│   └── allianz_corporate_index_scraper.py
 ├── pyproject.toml
 └── uv.lock
 ```
@@ -101,6 +89,6 @@ The script aggregates data from:
 ## Notes
 
 - Uses `cloudscraper` to improve reliability against anti-bot protections.
-- De-duplicates records by business unit, country, office name, and address.
-- The city-level report keeps one best-fit record per country/city, preferring head-office style entries over generic contacts.
-- The checked-in CSV is a generated dataset sample/output.
+- Splits multi-office country pages into separate city rows where possible.
+- Applies shared page/company phone details to each split office row when the page uses one shared contact block.
+- The city-level report header is `country,city,company_type,address,phone`.

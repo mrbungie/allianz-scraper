@@ -4,7 +4,7 @@ import unittest
 
 from bs4 import BeautifulSoup
 
-from scripts.allianz_scraper import AllianzScraper, OfficeRecord, build_city_report, looks_like_website_line
+from scripts.allianz_corporate_index_scraper import AllianzScraper, OfficeRecord, build_city_report, looks_like_website_line
 
 
 class FakeScraper(AllianzScraper):
