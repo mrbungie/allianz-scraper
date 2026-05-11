@@ -4,7 +4,7 @@ import unittest
 
 from bs4 import BeautifulSoup
 
-from scripts.allianz_scraper import AllianzScraper, looks_like_website_line
+from scripts.allianz_scraper import AllianzScraper, OfficeRecord, build_city_report, looks_like_website_line
 
 
 class FakeScraper(AllianzScraper):
@@ -13,6 +13,21 @@ class FakeScraper(AllianzScraper):
 
     def fetch(self, url: str) -> BeautifulSoup:
         return BeautifulSoup(self.pages[url], "html.parser")
+
+
+class RouteFakeScraper(AllianzScraper):
+    def __init__(self, corporate_links: list[str], records_by_url: dict[str, list[OfficeRecord]]) -> None:
+        self.corporate_links = corporate_links
+        self.records_by_url = records_by_url
+
+    def extract_corporate_links(self, index_url: str = "") -> list[str]:
+        return self.corporate_links
+
+    def parse_corporate_page(self, url: str) -> list[OfficeRecord]:
+        return self.records_by_url[url]
+
+    def extract_links(self, index_url: str, predicate):
+        raise AssertionError("unexpected non-corporate link extraction")
 
 
 class AllianzScraperTests(unittest.TestCase):
@@ -127,6 +142,89 @@ class AllianzScraperTests(unittest.TestCase):
         self.assertTrue(looks_like_website_line("commercial.allianz.com"))
         self.assertTrue(looks_like_website_line("www.allianz-trade.com"))
         self.assertFalse(looks_like_website_line("123 Main Street"))
+
+    def test_scrape_corporate_uses_custom_index_links(self) -> None:
+        germany = "https://www.allianz.com/en/about-us/company/contact/germany.html"
+        france = "https://www.allianz.com/en/about-us/company/contact/france.html"
+        scraper = RouteFakeScraper(
+            corporate_links=[germany, france],
+            records_by_url={
+                germany: [
+                    OfficeRecord(
+                        business_unit="Allianz Corporate",
+                        country="Germany",
+                        office_name="Allianz Germany",
+                        office_type="office",
+                        city="Munich",
+                        address="Koeniginstrasse 28, 80802 Munich, Germany",
+                        postcode="80802",
+                        phone="+49 89 123456",
+                        email="",
+                        website="",
+                        source_url=germany,
+                        source_page="Germany | Allianz",
+                        notes="",
+                    )
+                ],
+                france: [
+                    OfficeRecord(
+                        business_unit="Allianz Corporate",
+                        country="France",
+                        office_name="Allianz France",
+                        office_type="office",
+                        city="Paris",
+                        address="1 Cours Michelet, 92076 Paris, France",
+                        postcode="92076",
+                        phone="+33 1 23456789",
+                        email="",
+                        website="",
+                        source_url=france,
+                        source_page="France | Allianz",
+                        notes="",
+                    )
+                ],
+            },
+        )
+
+        records = scraper.scrape(corporate_index_url="https://www.allianz.com/en/about-us/company/contact.html", include_commercial=False, include_technology=False)
+
+        self.assertEqual(["Germany", "France"], [record.country for record in records])
+
+    def test_parse_corporate_page_applies_shared_phone_to_each_city_record(self) -> None:
+        url = "https://www.allianz.com/en/about-us/company/contact/italy.html"
+        scraper = FakeScraper(
+            {
+                url: """
+                <html>
+                  <head><title>Italy | Allianz</title></head>
+                  <body>
+                    <main>
+                      <h1>Italy</h1>
+                      <h2>Allianz S.p.A.</h2>
+                      <p>Registered office:</p>
+                      <p>Piazza Tre Torri, 3 – 20145 Milano</p>
+                      <p>Italy</p>
+                      <p>Operational offices:</p>
+                      <p>Piazza Tre Torri, 3 - 20145 Milano</p>
+                      <p>Largo Ugo Irneri, 1 - 34123 Trieste</p>
+                      <p>Italy</p>
+                      <p>+39 02 721 61</p>
+                      <p>+39 02 2216 5000</p>
+                      <p>www.allianz.it</p>
+                    </main>
+                  </body>
+                </html>
+                """,
+            }
+        )
+
+        records = scraper.parse_corporate_page(url)
+
+        self.assertEqual(3, len(records))
+        self.assertTrue(all(record.phone == "+39 02 721 61 | +39 02 2216 5000" for record in records))
+        city_rows = build_city_report(records)
+        self.assertEqual(["Milano", "Trieste"], [row.city for row in city_rows])
+        self.assertTrue(all(row.phone == "+39 02 721 61 | +39 02 2216 5000" for row in city_rows))
 
 
 if __name__ == "__main__":
